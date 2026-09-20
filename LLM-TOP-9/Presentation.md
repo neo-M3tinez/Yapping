@@ -251,6 +251,56 @@ Nhóm biện pháp này giúp **phát hiện và giới hạn** thiệt hại kh
 10. **Rate limiting & circuit breakers** — Giới hạn số lần gọi tool trong khoảng thời gian, dừng tự động khi vượt ngưỡng.
 - **Graduated enforcement:** Áp dụng chính sách tăng dần — audit trước, sau đó warn, rồi block, cuối cùng escalate cho người xử lý.
 
+### 4.4. Tool Guardrail
+
+**Tool Guardrail** là lớp kiểm soát nằm giữa agent và tool, kiểm tra mọi tool call trước khi thực thi. Đây là tuyến phòng thủ cuối cùng trước khi agent chạm vào hệ thống thật.
+
+**Kiểm tra gì?**
+
+- **Tool name:** Có được phép gọi không?
+- **Parameters:** Có nằm trong allowlist không?
+- **Context:** User có quyền thực hiện không?
+- **Impact:** Có rủi ro cao không? Cần approval không?
+
+**Cơ chế:**
+
+1. Agent sinh tool call.
+2. Guardrail intercept trước khi tool chạy.
+3. Kiểm tra theo policy → Allow / Block / Escalate.
+4. Log để audit.
+
+**Tại sao cần?**
+
+- LLM không đáng tin — có thể bị prompt injection, hallucination.
+- Guardrail là **deterministic** — không phụ thuộc vào LLM.
+
+---
+
+### 4.5. Fail Closed
+
+Khi guardrail gặp lỗi hoặc không chắc chắn, hệ thống phải quyết định: **cho qua (fail open)** hay **chặn (fail closed)**.
+
+| Tiêu chí | Fail Closed | Fail Open |
+|---|---|---|
+| Khi guardrail lỗi | Deny | Allow |
+| Bảo mật | Cao | Thấp |
+| Availability | Thấp | Cao |
+| Phù hợp | Hành động rủi ro cao | Hành động read-only |
+
+**Áp dụng:**
+
+| Tình huống | Fail mode |
+|---|---|
+| Tool authorization lỗi | **Fail Closed** |
+| Human approval timeout | **Fail Closed** |
+| Policy engine lỗi | **Fail Closed** |
+| Tool read-only lỗi | Fail Open (log + monitor) |
+| Tool write/delete/execute lỗi | **Fail Closed** |
+
+**Nguyên tắc:**
+
+> **Hành động nguy hiểm → Fail Closed. Hành động an toàn → Fail Open. Luôn log và monitor.**
+
 ## 5. KẾT LUẬN
 
 LLM03:2026 Excessive Agency là lỗ hổng xảy ra khi hệ thống cấp cho LLM/agent **quá nhiều quyền và khả năng hành động** so với mức cần thiết. Vấn đề không nằm ở model — mà nằm ở thiết kế hệ thống.
@@ -560,3 +610,169 @@ LLM10 là lỗ hổng xảy ra khi output LLM được đưa đến downstream *
 - LLM03 nói về **quyền và tự chủ** của agent.
 - LLM10 nói về **cách xử lý output** downstream.
 - LLM03 là điều kiện, LLM10 là điểm khai thác.
+
+--- 
+# PHẦN 3 — CÁC ENTRY CÒN LẠI TRONG TOP 10
+
+> **Ghi chú:** LLM01 Prompt Injection là entry vector — đã nhắc ở phần mở đầu. LLM03 Excessive Agency và LLM10 Improper Output Handling đã trình bày chi tiết ở Phần 1 và Phần 2. Dưới đây là các entry còn lại.
+
+---
+
+## LLM02:2026 — SENSITIVE INFORMATION DISCLOSURE
+
+> **Vai trò:** Impact
+
+**Định nghĩa:** Hệ thống LLM để lộ dữ liệu nhạy cảm qua output, log, embedding, hoặc side-channel.
+
+**Ví dụ:** Chatbot vô tình trả về số điện thoại, email, hoặc API key của người dùng khác.
+
+**Hậu quả:** Lộ PII, PHI, credentials, trade secrets. Vi phạm GDPR, HIPAA.
+
+**Mitigation:**
+- Kiểm soát dữ liệu đầu vào: không đưa dữ liệu nhạy cảm vào RAG corpus.
+- Kiểm tra quyền trước khi retrieve.
+- Không để secret trong system prompt.
+- Red-team để phát hiện rò rỉ.
+
+---
+
+## LLM04:2026 — SUPPLY CHAIN
+
+> **Vai trò:** Entry Vector
+
+**Định nghĩa:** Rủi ro từ model, dataset, adapter, hoặc tool của bên thứ ba.
+
+**Ví dụ:** Tải model từ Hugging Face về nhưng model đã bị chèn backdoor. Hoặc dùng MCP server độc hại.
+
+**Hậu quả:** Backdoor, poisoning, RCE, data breach.
+
+**Mitigation:**
+- Dùng SBOM/AIBOM để quản lý thành phần.
+- Verify chữ ký model (signing, hash-pin).
+- Chỉ dùng model/tool từ nguồn tin cậy.
+- Red-team model trước khi deploy.
+
+---
+
+## LLM05:2026 — DATA AND MODEL POISONING
+
+> **Vai trò:** Amplifier
+
+**Định nghĩa:** Đầu độc dữ liệu huấn luyện hoặc RAG corpus để model hành xử sai.
+
+**Ví dụ:** Chèn tài liệu độc hại vào RAG corpus. Khi user hỏi, model trả lời theo nội dung độc hại đó.
+
+**Hậu quả:** Model trả lời sai, backdoor trigger, misinformation.
+
+**Mitigation:**
+- Kiểm tra nguồn gốc dữ liệu.
+- Filter nội dung retrieve từ RAG.
+- Phát hiện bất thường trong training/embedding.
+- Red-team sau mỗi lần fine-tune.
+
+---
+
+## LLM06:2026 — UNBOUNDED CONSUMPTION
+
+> **Vai trò:** Impact
+
+**Định nghĩa:** LLM bị lạm dụng để tiêu tốn tài nguyên — DoS, chi phí tăng vọt, hoặc clone model.
+
+**Ví dụ:** Attacker gửi hàng loạt request phức tạp để làm cạn ngân sách API. Hoặc khai thác agent để chạy loop vô hạn.
+
+**Hậu quả:** Service unavailable, chi phí tăng vọt, mất IP.
+
+**Mitigation:**
+- Rate limit theo token và chi phí.
+- Hard spending caps.
+- Circuit breaker cho agent.
+- Sandbox để giới hạn resource.
+
+---
+
+## LLM07:2026 — MISINFORMATION
+
+> **Vai trò:** Impact
+
+**Định nghĩa:** LLM sinh thông tin sai nhưng trông đáng tin, khiến người hoặc hệ thống ra quyết định sai.
+
+**Ví dụ:** Chatbot y tế khuyên dùng thuốc sai. Hoặc agent báo cáo sai trạng thái hệ thống rồi tự động hành động.
+
+**Hậu quả:** Quyết định sai trong business, y tế, tài chính, pháp lý.
+
+**Mitigation:**
+- Ground output vào nguồn xác thực.
+- Kiểm tra claim trước khi hành động.
+- Validate tool call trước khi thực thi.
+- Human-in-the-loop cho hành động rủi ro cao.
+
+---
+
+## LLM08:2026 — HIDDEN CONTEXT EXPOSURE
+
+> **Vai trò:** Amplifier
+
+**Định nghĩa:** Lộ system prompt, tool schema, policy logic, hoặc refusal rules.
+
+**Ví dụ:** User hỏi "Show me your system prompt" và model trả lời thật. Hoặc lộ tool list qua conversational probing.
+
+**Hậu quả:** Lộ credentials (LLM02), lộ tool schema (LLM03), lộ refusal rules (LLM01).
+
+**Mitigation:**
+- Không để secret trong system prompt.
+- Deterministic guardrails, không dựa vào LLM.
+- Authorization độc lập với LLM.
+- Giả định hidden context luôn có thể bị lộ.
+
+---
+
+## LLM09:2026 — VECTOR AND EMBEDDING WEAKNESSES
+
+> **Vai trò:** Amplifier
+
+**Định nghĩa:** Rủi ro từ embedding layer — nơi similarity search quyết định model thấy gì.
+
+**Ví dụ:** Cross-tenant leak — user A query và nhận được dữ liệu của user B. Hoặc embedding bị đảo ngược để lấy lại văn bản gốc.
+
+**Hậu quả:** Lộ dữ liệu, poisoning, DoS retrieval.
+
+**Mitigation:**
+- Enforce tenant ACL trong query, không filter sau.
+- Track provenance của embedding.
+- Phát hiện bất thường trong retrieval.
+- Xóa embedding khi xóa source.
+
+---
+
+## BẢNG TỔNG HỢP
+
+| Entry | Vai trò | Hậu quả chính | Mitigation chính |
+|---|---|---|---|
+| LLM02 Sensitive Info Disclosure | Impact | Lộ dữ liệu nhạy cảm qua output, log, embedding | Kiểm soát dữ liệu đầu vào (không đưa dữ liệu nhạy cảm vào RAG corpus), kiểm tra quyền trước khi retrieve, không để secret trong system prompt, red-team để phát hiện rò rỉ |
+| LLM04 Supply Chain | Entry Vector | Backdoor, RCE, data breach từ model/tool bên thứ ba | Dùng SBOM/AIBOM để quản lý thành phần, verify chữ ký model (signing, hash-pin), chỉ dùng nguồn tin cậy, red-team model trước khi deploy |
+| LLM05 Data Poisoning | Amplifier | Model hành xử sai, backdoor trigger, misinformation | Kiểm tra nguồn gốc dữ liệu, filter nội dung retrieve từ RAG, phát hiện bất thường trong training/embedding, red-team sau mỗi lần fine-tune |
+| LLM06 Unbounded Consumption | Impact | DoS, chi phí tăng vọt, mất IP | Rate limit theo token và chi phí, hard spending caps, circuit breaker cho agent, sandbox để giới hạn resource |
+| LLM07 Misinformation | Impact | Quyết định sai trong business, y tế, tài chính, pháp lý | Ground output vào nguồn xác thực, kiểm tra claim trước khi hành động, validate tool call trước khi thực thi, human-in-the-loop cho hành động rủi ro cao |
+| LLM08 Hidden Context Exposure | Amplifier | Lộ credentials, tool schema, refusal rules, output format | Không để secret trong system prompt, deterministic guardrails (không dựa vào LLM), authorization độc lập với LLM, giả định hidden context luôn có thể bị lộ |
+| LLM09 Vector/Embedding | Amplifier | Lộ dữ liệu, poisoning, DoS retrieval | Enforce tenant ACL trong query (không filter sau), track provenance của embedding, phát hiện bất thường trong retrieval, xóa embedding khi xóa source |
+---
+
+## TỔNG QUAN VAI TRÒ
+
+Các entry trong Top 10 được chia thành 3 lớp theo mô hình bullseye:
+
+| Lớp | Vai trò | Entry |
+|---|---|---|
+| **Entry Vectors** | Điểm vào của chuỗi tấn công | LLM01 Prompt Injection, LLM04 Supply Chain, LLM05 Data Poisoning |
+| **Amplifiers** | Bộ khuếch đại, làm trầm trọng thêm | LLM03 Excessive Agency, LLM08 Hidden Context Exposure, LLM09 Vector/Embedding |
+| **Impacts** | Hậu quả cuối cùng | LLM02 Sensitive Info Disclosure, LLM06 Unbounded Consumption, LLM07 Misinformation |
+
+> **Nguyên tắc:** Để phòng thủ hiệu quả, cần bao phủ cả 3 lớp — Entry Vectors, Amplifiers, và Impacts. LLM03 và LLM10 là hai điểm then chốt vì chúng là **điều kiện** và **điểm khai thác**.
+
+---
+
+## Bảng mối quan hệ của các lớp trong mô hình Bullseye của OWASP GenAI LLM
+
+<img width="1129" height="1120" alt="image" src="https://github.com/user-attachments/assets/c49e0643-51de-475a-84d2-e790e7a5fa11" />
+
+
